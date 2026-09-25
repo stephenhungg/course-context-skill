@@ -6,7 +6,7 @@ The public repository is a **portable starter**, not a copy of anyone's private 
 
 ## Five-minute onboarding
 
-1. Install Node.js 22 and clone this repository. The runner is dependency-free. Run `npm test` in the clone.
+1. Install Node.js 22 and clone this repository. Confirm `node --version` starts with `v22.` before using the commands below. The runner is dependency-free. Run `npm test` in the clone.
 2. Install the skill by linking or copying `skills/course-context` into your Codex skills directory (normally `~/.codex/skills/course-context`). Restart/reload Codex if needed for discovery. Invoke it as `$course-context` or ask to refresh your course index.
 3. Make a private semester workspace outside the public repository. Run:
 
@@ -25,6 +25,10 @@ The public repository is a **portable starter**, not a copy of anyone's private 
 6. Review the private `.course-context/report.md`, `index.md`, and `runs/<run-id>/state.json`. Exit `0` means all registered sources checked; `2` means a completed partial run; `1` means local setup or processing failed. On `1`, inspect the current run checkpoint—do not assume the prior `state.json` is this attempt.
 
 The generated index is evidence, not a polished study plan. Keep your own notes and confirmed deadlines in a separate curated hub; do not edit generated files. On the first run, “added” means a baseline, not necessarily newly released material.
+
+### Already have a course-index workflow?
+
+You do not need to replace it with this starter runner. Install the skill, open your existing semester workspace, and ask Codex to use `$course-context` for a refresh. The skill reads a local `course-index-workflow.md` first and follows that workspace's stricter source registry, connector procedures, and runner. Keep its private caches and credentials where they are. The generic `init`/`sync` commands above are for a new portable workspace; they do not migrate or recreate an existing multi-connector setup automatically.
 
 ## Connected-source captures
 
