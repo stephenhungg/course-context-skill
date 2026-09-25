@@ -18,6 +18,6 @@ Captured envelope:
 
 `checked` requires `complete: true`, including for a genuinely empty result. Use `blocked` after attempting a source but failing to inspect it, and `not_attempted` when a dependency prevented the attempt. Neither may claim an empty success. A failed capture retains old records and their last-successful timestamp. Do not backdate a run to make stale evidence appear fresh.
 
-Only stable source IDs, course material titles, safe HTTPS URLs, source update time, due time, and event time are allowed in records. `event_at` is planning context and never a due date. Do not include descriptions, message bodies, scores, grades, feedback, submission identifiers, peer information, or private calendar details. Capture only course-scoped evidence and exclude unrelated items.
+Only stable source IDs, course material titles, safe HTTPS URLs, source update time, due time, and event time/date are allowed in records. `event_at` preserves a timed event's source offset; `event_date` is for an all-day date. Neither is a due date. Do not include descriptions, message bodies, scores, grades, feedback, submission identifiers, peer information, or private calendar details. Capture only course-scoped evidence and exclude unrelated items.
 
 Each source's current status, last attempt, last success, and prior records are separate. The generated index is evidence, not a curated claim of completion. The assistant should put reviewed interpretation in a human-maintained hub outside the generated files.

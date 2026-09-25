@@ -5,12 +5,13 @@ import path from 'node:path';
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sourceId = value => typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{0,79}$/.test(value);
 const keySet = (value, allowed) => Object.keys(value).every(key => allowed.includes(key));
+const validDate = value => typeof value === 'string' && /^\d{4}-\d\d-\d\d$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 
 export function timestamp(value, { observed = false } = {}) {
   if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Error('invalid_timestamp');
   const time = new Date(value);
   if (observed && time.getTime() > Date.now() + 5 * 60_000) throw new Error('future_timestamp');
-  return time.toISOString();
+  return value;
 }
 
 export function safeUrl(value) {
@@ -26,14 +27,18 @@ export function safeUrl(value) {
 export function validateConfig(config, { allowExamples = false } = {}) {
   if (!config || config.schema_version !== 1 || typeof config.semester !== 'string' || !config.semester.trim()) throw new Error('invalid_config');
   if (typeof config.timezone !== 'string' || !config.timezone || !Intl.supportedValuesOf('timeZone').includes(config.timezone)) throw new Error('invalid_timezone');
+  const window = config.term_window;
+  if (!window || !validDate(window.start_date) || !validDate(window.end_date) || window.end_date < window.start_date || Date.parse(`${window.end_date}T00:00:00Z`) - Date.parse(`${window.start_date}T00:00:00Z`) > 366 * 86_400_000) throw new Error('invalid_term_window');
   const canvas = config.canvas;
-  if (!canvas || !Array.isArray(canvas.courses) || !Array.isArray(config.public_sources) || !Array.isArray(config.connected_sources)) throw new Error('invalid_config');
+  if (!canvas || !Array.isArray(canvas.courses) || !canvas.courses.length || !Array.isArray(config.public_sources) || !Array.isArray(config.connected_sources)) throw new Error('invalid_config');
   const url = new URL(canvas.base_url);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/' || (!allowExamples && /\.(?:example|invalid|test)$/i.test(url.hostname))) throw new Error('invalid_canvas_origin');
   const slugs = new Set();
+  const courseIds = new Set();
   for (const course of canvas.courses) {
-    if (!Number.isSafeInteger(course.id) || course.id < 1 || !sourceId(course.slug) || slugs.has(course.slug)) throw new Error('invalid_course');
+    if (!Number.isSafeInteger(course.id) || course.id < 1 || courseIds.has(course.id) || !sourceId(course.slug) || slugs.has(course.slug)) throw new Error('invalid_course');
     slugs.add(course.slug);
+    courseIds.add(course.id);
   }
   const ids = new Set([...slugs].flatMap(slug => ['course', 'assignments', 'announcements', 'modules', 'pages', 'files', 'quizzes', 'discussions', 'calendar-events'].map(kind => `${slug}.canvas.${kind}`)));
   for (const source of [...config.public_sources, ...config.connected_sources]) {
@@ -47,17 +52,20 @@ export function validateConfig(config, { allowExamples = false } = {}) {
 }
 
 export function normalizeRecord(record) {
-  if (!record || typeof record !== 'object' || Array.isArray(record) || !keySet(record, ['id', 'kind', 'title', 'url', 'due_at', 'event_at', 'updated_at', 'fingerprint'])) throw new Error('invalid_record');
+  if (!record || typeof record !== 'object' || Array.isArray(record) || !keySet(record, ['id', 'kind', 'title', 'url', 'due_at', 'event_at', 'event_date', 'updated_at', 'fingerprint'])) throw new Error('invalid_record');
   if (typeof record.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(record.id) || !['assignment', 'announcement', 'material', 'event', 'course', 'other'].includes(record.kind) || typeof record.title !== 'string' || !record.title.trim() || record.title.length > 300) throw new Error('invalid_record');
   const normalized = {
     id: String(record.id), kind: record.kind, title: record.title.trim().replace(/[\u0000-\u001f]/g, ' '),
     url: safeUrl(record.url),
     due_at: record.due_at ? timestamp(record.due_at) : null,
     event_at: record.event_at ? timestamp(record.event_at) : null,
+    event_date: record.event_date ?? null,
     updated_at: record.updated_at ? timestamp(record.updated_at) : null,
     fingerprint: record.fingerprint ?? null,
   };
   if (normalized.fingerprint !== null && !/^[a-f0-9]{64}$/.test(normalized.fingerprint)) throw new Error('invalid_fingerprint');
+  if (normalized.event_date !== null && !validDate(normalized.event_date)) throw new Error('invalid_event_date');
+  if (normalized.event_date && normalized.event_at) throw new Error('ambiguous_event_time');
   normalized.content_hash = digest(normalized);
   return normalized;
 }
@@ -81,6 +89,7 @@ export function validateCapture(envelope, config) {
 export function applyResult(previous, result) {
   const prior = previous ?? null;
   const records = result.status === 'checked' ? result.records.map(normalizeRecord) : (prior?.records ?? []);
+  if (result.status === 'checked' && new Set(records.map(item => item.id)).size !== records.length) throw new Error('duplicate_record_ids');
   const old = new Map((prior?.records ?? []).map(item => [item.id, item]));
   const changes = [];
   if (result.status === 'checked') {
@@ -121,6 +130,28 @@ export async function readJson(file, fallback = null) {
   catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
 
+export async function readLimited(response, limit = 2_000_000) {
+  const announced = Number(response.headers.get('content-length'));
+  if (Number.isFinite(announced) && announced > limit) throw new Error('response_too_large');
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel();
+        throw new Error('response_too_large');
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks, size);
+  } finally { reader.releaseLock(); }
+}
+
 const md = text => String(text ?? '').replace(/\s+/g, ' ').replace(/[\\`*_{}\[\]<>|]/g, '\\$&');
 const link = (title, url) => url ? `[${md(title)}](<${url}>)` : md(title);
 
@@ -131,7 +162,7 @@ export function renderIndex(state, config) {
     lines.push('', `## ${md(course.slug)}`, '');
     for (const source of Object.values(state.sources).filter(item => item.course === course.slug).sort((a, b) => a.id.localeCompare(b.id))) {
       lines.push(`### ${md(source.id)}`, '', `status: ${source.status}; last success: ${source.last_successful_at ?? 'never'}.`, '');
-      for (const item of source.records) lines.push(`- ${link(item.title, item.url)} — ${md(item.kind)}${item.due_at ? `; due ${item.due_at}` : ''}${item.event_at ? `; event ${item.event_at} (not a deadline)` : ''}`);
+      for (const item of source.records) lines.push(`- ${link(item.title, item.url)} — ${md(item.kind)}${item.due_at ? `; source due value ${item.due_at}` : ''}${item.event_at ? `; event ${item.event_at} (not a deadline)` : ''}${item.event_date ? `; all-day event ${item.event_date} (not a deadline)` : ''}`);
       if (!source.records.length) lines.push(source.status === 'checked' ? '- no records in this completed check.' : '- no verified records available.');
       lines.push('');
     }
@@ -143,9 +174,9 @@ export function renderReport(state) {
   const sources = Object.values(state.sources);
   const checked = sources.filter(item => item.status === 'checked').length;
   const now = Date.now();
-  const soon = sources.flatMap(source => source.records.filter(item => item.due_at && Date.parse(item.due_at) >= now && Date.parse(item.due_at) <= now + 7 * 86_400_000).map(item => ({ source, item }))).sort((a, b) => a.item.due_at.localeCompare(b.item.due_at));
+  const soon = sources.flatMap(source => source.records.filter(item => item.due_at && Date.parse(item.due_at) >= now && Date.parse(item.due_at) <= now + 7 * 86_400_000).map(item => ({ source, item }))).sort((a, b) => Date.parse(a.item.due_at) - Date.parse(b.item.due_at));
   const lines = ['# Course refresh report', '', `run: ${state.run_id}`, `coverage: ${checked}/${sources.length} registered sources checked.`, '', 'first-run additions are a baseline, not necessarily newly posted work. stale records remain visible after failures.', '', '## due within seven days', ''];
-  lines.push(...(soon.length ? soon.map(({ source, item }) => `- ${md(source.course)}: ${md(item.title)} — ${item.due_at} (source: ${md(source.id)}${source.status === 'checked' ? '' : ', stale evidence'})`) : ['- none in verified records; check access gaps below.']));
+  lines.push(...(soon.length ? soon.map(({ source, item }) => `- ${md(source.course)}: ${md(item.title)} — source due value ${item.due_at} (source: ${md(source.id)}${source.status === 'checked' ? '' : ', stale evidence'}; verify personal overrides in the live assignment system)`) : ['- none in verified records; check access gaps below.']));
   lines.push('', '## changes', '');
   lines.push(...(state.changes.length ? state.changes.map(item => `- ${item.type}: ${md(item.source_id)} / ${md(item.title)}`) : ['- no record changes in checked sources; this is not an all-source no-change claim unless coverage is complete.']));
   lines.push('', '## access gaps', '');

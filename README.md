@@ -6,25 +6,44 @@ The public repository is a **portable starter**, not a copy of anyone's private 
 
 ## Five-minute onboarding
 
-1. Install Node.js 22 and clone this repository. Confirm `node --version` starts with `v22.` before using the commands below. The runner is dependency-free. Run `npm test` in the clone.
-2. Install the skill by linking or copying `skills/course-context` into your Codex skills directory (normally `~/.codex/skills/course-context`). Restart/reload Codex if needed for discovery. Invoke it as `$course-context` or ask to refresh your course index.
+1. Install Node.js 22. On macOS/Linux, clone and test the repository:
+
+   ```bash
+   git clone https://github.com/stephenhungg/course-context-skill.git
+   cd course-context-skill
+   node --version
+   npm test
+   ```
+
+   Confirm the version starts with `v22.` before continuing. The runner has no package dependencies.
+2. Install the skill by linking the cloned folder into your Codex skills directory:
+
+   ```bash
+   mkdir -p ~/.codex/skills
+   ln -s "$PWD/skills/course-context" ~/.codex/skills/course-context
+   ```
+
+   If the destination already exists, inspect it rather than overwriting it. On another platform, copy the `skills/course-context` folder to the corresponding Codex skills directory. Restart/reload Codex if needed for discovery. Invoke it as `$course-context` or ask to refresh your course index.
 3. Make a private semester workspace outside the public repository. Run:
 
    ```bash
    node /path/to/course-context-skill/src/cli.mjs init /path/to/private-semester
    ```
 
-4. Edit `/path/to/private-semester/.course-context/config.json`: replace the example Canvas origin and course ID; add every course slug and each public/connected source you want tracked. Keep the config and all generated files private. The example values cannot be used for a live sync.
-5. Supply a Canvas token locally as `CANVAS_TOKEN` through your shell or secret manager, then run:
+4. Edit `/path/to/private-semester/.course-context/config.json`: replace the example Canvas origin and course ID (the number in a Canvas `/courses/12345` URL); set the term's first and last dates, inclusive; add every course slug and each public/connected source you want tracked. Keep the config and all generated files private. The example values cannot be used for a live sync.
+5. Run `node /path/to/course-context-skill/src/cli.mjs check /path/to/private-semester`. This validates the config without network access, checks file permissions, and confirms `.course-context/` is Git-ignored and untracked when the workspace is in another repository. If it reports `private_dir_not_gitignored`, add `.course-context/` to that workspace's `.gitignore` before continuing. If it reports `private_dir_tracked_in_git`, stop and inspect that repository's index/history before doing anything else; an ignore rule cannot undo an earlier commit. Keep the ignore rule in place.
+6. Supply a Canvas token locally as `CANVAS_TOKEN` through your shell or secret manager, then run:
 
    ```bash
    node /path/to/course-context-skill/src/cli.mjs sync /path/to/private-semester
    ```
 
    The command only sends authenticated **GET** requests to the configured Canvas origin. It never puts the token in a URL or output file. Do not paste tokens into chat, commands, GitHub issues, or config files. Without a token, Canvas sources are marked `not_attempted` while public sources still run.
-6. Review the private `.course-context/report.md`, `index.md`, and `runs/<run-id>/state.json`. Exit `0` means all registered sources checked; `2` means a completed partial run; `1` means local setup or processing failed. On `1`, inspect the current run checkpoint—do not assume the prior `state.json` is this attempt.
+7. Review the private `.course-context/report.md`, `index.md`, and `runs/<run-id>/state.json`. For `sync`, exit `0` means all registered sources checked; `2` means a completed partial run; `1` means local setup or processing failed. On `1`, inspect the current run checkpoint—do not assume the prior `state.json` is this attempt. For `check`, exit `2` means a privacy warning that must be fixed before capture or sync.
 
 The generated index is evidence, not a polished study plan. Keep your own notes and confirmed deadlines in a separate curated hub; do not edit generated files. On the first run, “added” means a baseline, not necessarily newly released material.
+
+If you configured this starter before version 0.2, add `term_window` to your private config before the next sync, for example `"term_window": { "start_date": "2026-08-15", "end_date": "2026-12-31" }`. The runner will reject a missing window rather than treating Canvas's today-only calendar default as semester coverage.
 
 ### Already have a course-index workflow?
 
@@ -41,7 +60,7 @@ node /path/to/course-context-skill/src/cli.mjs sync /path/to/private-semester
 
 The [capture contract](skills/course-context/references/source-contract.md) has the field schema and status rules. The runner rejects extra fields, including grades, feedback, message bodies, and submission IDs. It stores a sanitized private snapshot and imports it only once. A reused or older-than-24-hour capture becomes `not_attempted`, not a fresh check. Genuine empty success requires `status: "checked"` and `complete: true`.
 
-Use connected tools, not browser cookies or undocumented API endpoints, for authenticated sources. Email receipts are historical evidence only. Calendar event times remain `event_at`; they cannot become assignment due dates.
+Use connected tools, not browser cookies or undocumented API endpoints, for authenticated sources. Email receipts are historical evidence only. Timed calendar events retain the source offset in `event_at`; all-day events use `event_date`. Neither becomes an assignment due date.
 
 ## Daily operation
 
@@ -52,10 +71,11 @@ The skill should inspect the report, verify any new deadline against the live so
 ## Design and limits
 
 - Per-source checkpoints and last-successful records survive an endpoint failure; `blocked` and `not_attempted` are distinct from a checked empty result.
-- Canvas follows `Link` pagination, limits pages, rejects cross-origin pagination and redirects, and retries only transient network/429/5xx failures. It sends requests sequentially to avoid unnecessary throttling.
+- Canvas follows `Link` pagination, limits each source to 75 seconds, 100 pages, 10,000 items, and 2 MB per response, rejects cross-origin pagination and redirects, and retries only transient network/429/5xx failures. It stops the source when a rate-limit response asks for a delay beyond its bounded wait. Requests are sequential to avoid unnecessary throttling.
+- Canvas calendar events use the configured semester window. Without it, Canvas defaults the listing to today, so the runner refuses an incomplete term configuration.
 - Public URL checks hash the fetched response and record only its title/URL/hash. They do **not** recursively crawl links or certify that PDFs, images, videos, or every page were deeply read.
 - The runner indexes metadata, not assignment descriptions, answers, scores, peer work, or transcripts. Any broader adapter needs a separate privacy and course-policy review.
-- Source timestamps reflect captures, not the time the report was rendered. A calendar event is planning context, not an official deadline.
+- Source timestamps reflect captures, not the time the report was rendered. Assignment due values can have section or individual overrides; verify the live assignment page before treating one as your personal deadline. A calendar event is planning context, not an official deadline.
 - A course may disable some Canvas endpoints. Those are recorded as access gaps while other sources continue.
 
 See [upgrade decisions](docs/upgrade-decisions.md) for the research-backed changes from the original personal workflow and [contributing](CONTRIBUTING.md) before proposing a new connector.

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { open, readFile, mkdir, writeFile, unlink } from 'node:fs/promises';
+import { open, readFile, mkdir, writeFile, unlink, lstat } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { applyResult, atomicJson, atomicText, readJson, renderIndex, renderReport, safeUrl, validateCapture, validateConfig } from './core.mjs';
+import { applyResult, atomicJson, atomicText, readJson, readLimited, renderIndex, renderReport, safeUrl, validateCapture, validateConfig } from './core.mjs';
 import { canvasSources, fetchCanvasSource } from './canvas.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -15,6 +16,26 @@ async function loadConfig() {
   return validateConfig(await readJson(path.join(privateDir, 'config.json')));
 }
 
+async function privateWorkspaceIssue() {
+  const folder = await lstat(privateDir);
+  if (folder.isSymbolicLink() || !folder.isDirectory() || (folder.mode & 0o077) !== 0) return 'private_dir_permissions';
+  const config = await lstat(path.join(privateDir, 'config.json'));
+  if (config.isSymbolicLink() || !config.isFile() || (config.mode & 0o077) !== 0) return 'config_permissions';
+  const inGit = spawnSync('git', ['-C', workspace, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' });
+  if (inGit.status === 0 && inGit.stdout.trim() === 'true') {
+    const tracked = spawnSync('git', ['-C', workspace, 'ls-files', '--cached', '--', privateDir], { encoding: 'utf8' });
+    if (tracked.status === 0 && tracked.stdout.trim()) return 'private_dir_tracked_in_git';
+    const ignored = spawnSync('git', ['-C', workspace, 'check-ignore', '-q', '--', privateDir]);
+    if (ignored.status !== 0) return 'private_dir_not_gitignored';
+  }
+  return null;
+}
+
+async function requirePrivateWorkspace() {
+  const issue = await privateWorkspaceIssue();
+  if (issue) throw new Error(issue);
+}
+
 async function init() {
   await mkdir(privateDir, { recursive: true, mode: 0o700 });
   const target = path.join(privateDir, 'config.json');
@@ -23,9 +44,21 @@ async function init() {
   const example = await readFile(path.join(root, 'config.example.json'), 'utf8');
   await writeFile(target, example, { flag: 'wx', mode: 0o600 });
   console.log(`private starter config created: ${target}`);
+  const issue = await privateWorkspaceIssue();
+  if (issue) console.log(`privacy check: ${issue}; fix this before capture or sync`);
+}
+
+async function check() {
+  const config = await loadConfig();
+  const issue = await privateWorkspaceIssue();
+  console.log(`config valid: ${config.canvas.courses.length} courses, ${config.public_sources.length} public sources, ${config.connected_sources.length} connected sources`);
+  console.log(`Canvas token: ${process.env.CANVAS_TOKEN ? 'available' : 'missing (Canvas checks will be not_attempted)'}`);
+  console.log(`private workspace: ${issue ?? 'safe'}`);
+  if (issue) process.exitCode = 2;
 }
 
 async function capture() {
+  await requirePrivateWorkspace();
   const config = await loadConfig();
   const chunks = [];
   for await (const chunk of process.stdin) {
@@ -51,10 +84,7 @@ function publicSources(config) {
 async function fetchPublicSource(source) {
   const response = await fetch(source.url, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(20_000), headers: { Accept: 'text/html, text/plain, application/pdf, */*' } });
   if (!response.ok) throw new Error(`public_http_${response.status}`);
-  const length = Number(response.headers.get('content-length'));
-  if (Number.isFinite(length) && length > 2_000_000) throw new Error('public_page_too_large');
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length > 2_000_000) throw new Error('public_page_too_large');
+  const bytes = await readLimited(response);
   const text = response.headers.get('content-type')?.includes('text/html') ? bytes.toString('utf8') : '';
   const title = text.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim().slice(0, 300) ?? new URL(source.url).pathname.split('/').filter(Boolean).at(-1) ?? source.id;
   const fingerprint = createHash('sha256').update(bytes).digest('hex');
@@ -72,6 +102,7 @@ async function withLock(fn) {
 }
 
 async function sync() {
+  await requirePrivateWorkspace();
   const config = await loadConfig();
   return withLock(async () => {
     const previous = await readJson(path.join(privateDir, 'state.json'), { sources: {} });
@@ -81,9 +112,9 @@ async function sync() {
     const checkpoint = async () => atomicJson(path.join(runDir, 'state.json'), state);
     await checkpoint();
     const tasks = [
-      ...canvasSources(config).map(source => ({ source, collect: () => fetchCanvasSource(source, process.env.CANVAS_TOKEN) })),
-      ...publicSources(config).map(source => ({ source, collect: () => fetchPublicSource(source) })),
-      ...config.connected_sources.map(source => ({ source, collect: async () => {
+      ...canvasSources(config).map(source => ({ source, adapter: 'canvas', collect: () => fetchCanvasSource(source, process.env.CANVAS_TOKEN) })),
+      ...publicSources(config).map(source => ({ source, adapter: 'public', collect: () => fetchPublicSource(source) })),
+      ...config.connected_sources.map(source => ({ source, adapter: 'capture', collect: async () => {
         const envelope = await readJson(path.join(privateDir, 'capture-input', `${source.id}.json`));
         if (!envelope) return { status: 'not_attempted', records: [], error: 'capture_missing' };
         const input = validateCapture(envelope, config);
@@ -99,7 +130,7 @@ async function sync() {
         const collected = await task.collect();
         result = Array.isArray(collected) ? { status: 'checked', records: collected } : collected;
       } catch (error) {
-        result = { status: source.kind === 'course' || source.id.includes('.canvas.') ? process.env.CANVAS_TOKEN ? 'blocked' : 'not_attempted' : 'blocked', records: [], error: /^[a-z_]+(?:_http_\d+)?$/.test(error.message) ? error.message : 'source_check_failed' };
+        result = { status: task.adapter === 'canvas' && !process.env.CANVAS_TOKEN ? 'not_attempted' : 'blocked', records: [], error: /^[a-z_]+(?:_http_\d+)?$/.test(error.message) ? error.message : 'source_check_failed' };
       }
       const incoming = { id: source.id, course: source.course, url: source.display_url ?? source.url, status: result.status, checked_at: result.checked_at ?? new Date().toISOString(), records: result.records, error: result.error };
       try {
@@ -127,9 +158,10 @@ async function sync() {
 try {
   if (Number(process.versions.node.split('.')[0]) !== 22) throw new Error('node_22_required');
   if (command === 'init') await init();
+  else if (command === 'check') await check();
   else if (command === 'capture') await capture();
   else if (command === 'sync') await sync();
-  else throw new Error('usage: node src/cli.mjs init|capture|sync [workspace]');
+  else throw new Error('usage: node src/cli.mjs init|check|capture|sync [workspace]');
 } catch (error) {
   console.error(`course context: ${/^[a-z_]+(?:_http_\d+)?$/.test(error.message) ? error.message : 'operation_failed'}`);
   process.exitCode = 1;
