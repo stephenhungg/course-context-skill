@@ -1,0 +1,4 @@
+interface:
+  display_name: "Course Context"
+  short_description: "Keep a sourced, private index of course work"
+  default_prompt: "Use $course-context to refresh my course index and show what changed."

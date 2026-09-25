@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "semester": "Fall 2026",
+  "timezone": "America/Los_Angeles",
+  "canvas": {
+    "base_url": "https://canvas.example.edu",
+    "courses": [
+      { "id": 12345, "slug": "example101" }
+    ]
+  },
+  "public_sources": [
+    { "id": "example101.course-site", "course": "example101", "url": "https://course.example.edu/" }
+  ],
+  "connected_sources": [
+    { "id": "example101.gradescope", "course": "example101", "url": "https://www.gradescope.com/" }
+  ]
+}
